@@ -1,0 +1,134 @@
+<#
+.SYNOPSIS
+
+Set-OSEVM 1.0
+
+
+.DESCRIPTION
+Change VM configuration to have 12 cores in line with vNUMA stantards and disable CPU hot add
+
+.PARAMETER servername
+Device on which the CPU configuration should be changed.
+
+.EXAMPLE
+Change configuration on apsrp6852
+set-osevm apsrp6852
+
+#>
+
+
+function Set-OSEVM {
+    [CmdletBinding()]
+    param (
+    [Parameter(Mandatory=$true, 
+    position = 0)]
+    [string[]]$servername   
+)
+
+
+BEGIN {
+#creating API connection to fetch VCenter info.
+
+$URI = 
+$proxy = New-WebServiceProxy -Uri $URI -Class server -Namespace webservice
+ $ErrorActionPreference = "Stop"
+}
+
+PROCESS {
+Import-Module vmware.vimautomation.core
+CLS
+#capturing vcenter credentials
+
+if ($vcentercreds -eq $null) {$vcentercreds = Get-Credential -Message "vCenter Credentials"}
+
+#Connecting to resiliancy zones
+
+if (((get-powercliconfiguration | ? {$_.scope -eq "user"}).defaultviservermode) -notmatch "multiple") {
+Set-PowerCLIConfiguration -Scope User -DefaultVIServerMode Multiple -Confirm:$false}
+<#
+#verify server name
+do {$response = Read-Host -prompt "Is $servername the correct server(y/n)"
+	if ($response -ne "y") {$servername = Read-Host -Prompt "Please provide correct server name"}
+		}
+
+	until  ($response -eq "y")
+#>
+	
+#get specs from VM
+	
+	$hotadd = $vm | Get-AdvancedSetting vcpu.hotadd
+	$VMSockets = $vm.NumCpu/$vm.CoresPerSocket
+	$VMCoresperSocket = $vm.CoresPerSocket
+	$VMHostProcessors = ($vm.vmhost| Get-View).hardware.cpuinfo.numcpupackages
+	$VMHostCores = ($vm.vmhost| Get-View).hardware.cpuinfo.numcpucores
+	$VMHostCorespersocket = $VMHostCores/$VMHostProcessors
+	
+	if ($hotadd -eq $null) {
+		$hotaddvalue = "Disabled"
+	}
+	elseif ($hotadd.Value -match "false") {
+		$hotaddvalue = "Disabled"
+	}
+	
+	else {
+		$hotaddvalue = "Enabled"
+	}
+	
+Write-Host "Current specs are $vmsockets sockets, $vmCoresPerSocket cores per sockets, and vCPU hot add is $hotaddvalue"
+
+if ($VMhostCorespersocket -ge 12) {$dvms=1 } else {$dvms=2}
+if ($dvms -eq 1) {$dvmcps=12 } else {$dvmcps=6}
+
+#Shut down VM if it is powered on
+
+if ($vm.PowerState -match "on") {
+
+	Write-Host "Shutting down " $vm.Name
+	$vm | Shutdown-VMGuest -confirm:$false > $null
+	
+	do {Write-Host "Waiting for " $vm.Name "to shut down"
+	$vm = Get-VM $servername | ? {($_ | Get-View).runtime.connectionstate -eq "connected"}
+	sleep -Seconds 5
+		}
+
+	until  ($vm.PowerState -match "off")
+}
+
+Write-Host $vm.Name "has been powered off"
+
+#Change specs of VM
+
+if ($dvms -ne $VMSockets -or $dvmcps -ne $VMCoresperSocket) {Write-host "Changing sockets to $dvms and cores per socket to $dvmcps"
+Set-VM $vm -CoresPerSocket $dvmcps -NumCpu 12 -Confirm:$false > $null}
+
+if ($hotaddvalue -match "Enabled") {write-host "Disabling CPU hot add"
+get-AdvancedSetting -Entity $vm -Name vcpu.hotadd | Set-AdvancedSetting -Value Disabled -Confirm:$false > $null}
+
+	$vm = Get-VM $servername | ? {($_ | Get-View).runtime.connectionstate -eq "connected"}
+	$hotadd = $vm | Get-AdvancedSetting vcpu.hotadd
+	$VMSockets = $vm.NumCpu/$vm.CoresPerSocket
+	$VMCoresperSocket = $vm.CoresPerSocket
+	
+	if ($hotadd -eq $null) {
+		$hotaddvalue = "Disabled"
+	}
+	elseif ($hotadd.Value -match "false") {
+		$hotaddvalue = "Disabled"
+	}
+	
+	else {
+		$hotaddvalue = "Enabled"
+	}
+
+Write-Host "Specs are now $vmsockets sockets, $vmCoresPerSocket cores per sockets, and vCPU hot add is $hotaddvalue"
+
+#Power on VM
+
+Write-Host "Powering on " $vm.Name
+Start-VM $vm > $null
+$vm | Wait-Tools
+Write-Host "Specs are now $vmsockets sockets, $vmCoresPerSocket cores per sockets, and vCPU hot add is $hotaddvalue"
+Write-Host $vm.Name " is up and running"
+
+}
+}
