@@ -1,0 +1,1 @@
+﻿(get-credential).password | ConvertFrom-SecureString | set-content securepass.txt
